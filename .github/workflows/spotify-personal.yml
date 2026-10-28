@@ -1,0 +1,73 @@
+name: Build Spotify CarPlay Lyrics
+on:
+  workflow_dispatch:
+    inputs:
+      spotify_client_id:
+        description: 'Spotify Client ID (leave empty for a compile-only test)'
+        required: false
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Get Spotify-capable DriveVerse source
+        uses: actions/checkout@v4
+        with:
+          repository: praveetgupta/driveverse
+          ref: main
+          persist-credentials: false
+      - name: Record source and tools
+        run: |
+          git rev-parse HEAD
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Configure personal app
+        env:
+          SPOTIFY_CLIENT_ID: ${{ inputs.spotify_client_id }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, plistlib, re
+          client = os.environ.get('SPOTIFY_CLIENT_ID', '').strip()
+          if client and not re.fullmatch(r'[0-9a-fA-F]{32}', client):
+              raise SystemExit('Spotify Client ID must be 32 hexadecimal characters; do not enter a Client Secret.')
+          if not client:
+              print('Compile-only build: Spotify login will require rebuilding with a real Client ID.')
+          path = pathlib.Path('DriveVerse/Resources/Secrets.plist')
+          with path.open('wb') as f:
+              plistlib.dump({'SpotifyClientID': client or 'YOUR_SPOTIFY_CLIENT_ID'}, f)
+          project = pathlib.Path('project.yml')
+          project.write_text(project.read_text().replace('com.praveetgupta', 'io.github.ahmedmalik713'))
+          PY
+      - name: Generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Run core unit tests
+        run: bash scripts/test.sh
+      - name: Build unsigned app
+        run: |
+          set -euo pipefail
+          xcodebuild -project DriveVerse.xcodeproj -scheme DriveVerse -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+      - name: Verify and package app with Live Activity
+        run: |
+          set -euo pipefail
+          APP=build/Build/Products/Release-iphoneos/DriveVerse.app
+          test -d "$APP/PlugIns/DriveVerseWidgets.appex"
+          test -f "$APP/Secrets.plist"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry Spotify-CarPlay-Lyrics-unsigned.ipa Payload
+          git rev-parse HEAD > SOURCE-COMMIT.txt
+          cp LICENSE SOURCE-LICENSE.txt
+      - name: Upload app for Windows signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spotify-CarPlay-Lyrics
+          path: |
+            Spotify-CarPlay-Lyrics-unsigned.ipa
+            SOURCE-COMMIT.txt
+            SOURCE-LICENSE.txt
+          retention-days: 7
